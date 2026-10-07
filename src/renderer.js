@@ -1,4 +1,4 @@
-import { WORLD } from './world.js';
+import { WORLD, getWorld } from './world.js';
 
 const W = 1000, H = 700, TILE = 48, OX = 20, OY = 14;
 const TAU = Math.PI * 2;
@@ -17,6 +17,7 @@ const roundRect = (c, x, y, w, h, r, color) => { c.fillStyle = color; c.beginPat
 /** A deterministic, dependency-free tactical map. All coordinates are world cells. */
 export class MapRenderer {
   constructor(canvas, { onCell = () => {}, onHover = () => {} } = {}) {
+    this.world = WORLD;
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.state = null;
@@ -63,10 +64,14 @@ export class MapRenderer {
     if (!v || !v.scale) return null;
     const x = Math.floor(((event.clientX - rect.left - v.x) / v.scale - OX) / TILE);
     const y = Math.floor(((event.clientY - rect.top - v.y) / v.scale - OY) / TILE);
-    return x >= 0 && x < WORLD.width && y >= 0 && y < WORLD.height ? { x, y } : null;
+    return x >= 0 && x < this.world.width && y >= 0 && y < this.world.height ? { x, y } : null;
   }
 
   draw(state, options = {}) {
+    if (state?.worldId && state.worldId !== this.world.id) {
+      this.world = getWorld(state.worldId);
+      this.paintLandscape(this.map.getContext('2d'));
+    }
     this.state = state;
     this.options = options;
     this.render(performance.now() / 1000);
@@ -88,10 +93,10 @@ export class MapRenderer {
   paintLandscape(c) {
     c.fillStyle = '#112522'; c.fillRect(0, 0, W, H);
     const ground = c.createLinearGradient(0, 0, W, H);
-    ground.addColorStop(0, '#294039'); ground.addColorStop(.45, '#2a4238'); ground.addColorStop(1, '#203731');
+    ground.addColorStop(0, this.world.theme === 'ruins' ? '#504437' : this.world.theme === 'archive' ? '#29323c' : '#294039'); ground.addColorStop(.45, this.world.theme === 'ruins' ? '#574d3c' : this.world.theme === 'archive' ? '#38434b' : '#2a4238'); ground.addColorStop(1, '#203731');
     c.fillStyle = ground; c.fillRect(OX, OY, TILE * 20, TILE * 14);
-    for (let y = 0; y < WORLD.height; y++) for (let x = 0; x < WORLD.width; x++) {
-      const kind = WORLD.tiles[y][x], p = center({ x, y });
+    for (let y = 0; y < this.world.height; y++) for (let x = 0; x < this.world.width; x++) {
+      const kind = this.world.tiles[y][x], p = center({ x, y });
       if (kind === 'path' || kind === 'bridge') {
         const gradient = c.createLinearGradient(p.x, p.y - 24, p.x, p.y + 24);
         gradient.addColorStop(0, '#766c4a'); gradient.addColorStop(.5, '#8c7b52'); gradient.addColorStop(1, '#6b6549');
@@ -116,12 +121,11 @@ export class MapRenderer {
         line(c, [[xx - 1, yy], [xx - 3, yy - 4], [xx, yy - 2], [xx + 3, yy - 5]], '#67825480');
       }
     }
-    this.paintRiver(c);
-    this.paintBridge(c);
+    if (this.world.river) { this.paintRiver(c); this.paintBridge(c); }
     // The old eastern watchhouse occupies exactly the four impassable tiles.
     this.paintHouse(c, center({ x: 14, y: 3 }));
-    for (let y = 0; y < WORLD.height; y++) for (let x = 0; x < WORLD.width; x++) {
-      const kind = WORLD.tiles[y][x];
+    for (let y = 0; y < this.world.height; y++) for (let x = 0; x < this.world.width; x++) {
+      const kind = this.world.tiles[y][x];
       if (kind === 'tree' || kind === 'forest') this.paintTree(c, x, y, kind === 'forest');
       if (kind === 'rock') this.paintRock(c, x, y);
     }
@@ -130,12 +134,12 @@ export class MapRenderer {
     this.paintLantern(c, center({ x: 12, y: 7 }));
     this.paintLantern(c, center({ x: 16, y: 4 }));
     c.font = '8px sans-serif'; c.textAlign = 'center'; c.fillStyle = '#d2cba276';
-    c.fillText('СТАРАЯ ЗАСТАВА', OX + 15 * TILE, OY + 5 * TILE + 10);
-    c.fillText('ПЕРЕПРАВА', OX + 10.5 * TILE, OY + 8 * TILE + 17);
+    c.fillText(this.world.theme === 'ruins' ? 'РАЗРУШЕННЫЙ ХРАМ' : this.world.theme === 'archive' ? 'ХРАНИЛИЩЕ ПЕЧАТЕЙ' : 'СТАРАЯ ЗАСТАВА', OX + 15 * TILE, OY + 5 * TILE + 10);
+    c.fillText(this.world.river ? 'ПЕРЕПРАВА' : 'СТАРЫЙ ТРАКТ', OX + 10.5 * TILE, OY + 8 * TILE + 17);
     // Leaf litter, little wildflowers and a quiet trail of stone markers.
     for (let i = 0; i < 130; i++) {
       const x = 1 + seed(i, 4) * 18, y = 1 + seed(i, 2) * 12;
-      const cell = WORLD.tiles[Math.floor(y)][Math.floor(x)];
+      const cell = this.world.tiles[Math.floor(y)][Math.floor(x)];
       if (cell !== 'grass') continue;
       const xx = OX + x * TILE, yy = OY + y * TILE;
       if (i % 4) {
@@ -279,8 +283,8 @@ export class MapRenderer {
     c.fillStyle = shade; c.fillRect(0, 0, W, H);
     c.strokeStyle = '#b6b27c3c'; c.lineWidth = 1; c.strokeRect(OX - .5, OY - .5, 961, 673);
     c.fillStyle = '#aab2977a'; c.font = '8px "Courier New", monospace'; c.textAlign = 'center';
-    for (let x = 0; x < WORLD.width; x++) c.fillText(String(x + 1).padStart(2, '0'), OX + (x + .5) * TILE, 10);
-    for (let y = 0; y < WORLD.height; y++) c.fillText(String.fromCharCode(65 + y), 10, OY + (y + .5) * TILE + 3);
+    for (let x = 0; x < this.world.width; x++) c.fillText(String(x + 1).padStart(2, '0'), OX + (x + .5) * TILE, 10);
+    for (let y = 0; y < this.world.height; y++) c.fillText(String.fromCharCode(65 + y), 10, OY + (y + .5) * TILE + 3);
     for (const [x, y, dx, dy] of [[OX, OY, 1, 1], [980, OY, -1, 1], [OX, 686, 1, -1], [980, 686, -1, -1]]) {
       line(c, [[x + dx * 15, y], [x, y], [x, y + dy * 15]], '#c6b58e99', 2);
     }
@@ -309,7 +313,7 @@ export class MapRenderer {
   }
 
   paintWaterMotion(c, t) {
-    if (this.reducedMotion) return;
+    if (this.reducedMotion || !this.world.river) return;
     c.save(); c.beginPath(); c.rect(OX + 10 * TILE + 3, OY, TILE - 6, 672); c.clip();
     for (let i = 0; i < 13; i++) {
       const y = OY + ((i * 59 + t * 10) % 675);
@@ -325,7 +329,7 @@ export class MapRenderer {
     const selected = (state.party || []).find(unit => unit.id === state.selectedId);
     const combat = state.phase === 'combat';
     const options = this.options;
-    if (combat) {
+    if (combat && options.showGrid !== false) {
       c.strokeStyle = '#becfac10'; c.lineWidth = .6; c.beginPath();
       for (let x = 0; x <= 20; x++) { c.moveTo(OX + x * TILE, OY); c.lineTo(OX + x * TILE, OY + 14 * TILE); }
       for (let y = 0; y <= 14; y++) { c.moveTo(OX, OY + y * TILE); c.lineTo(OX + 20 * TILE, OY + y * TILE); }
@@ -346,7 +350,7 @@ export class MapRenderer {
       c.beginPath(); c.moveTo(p.x, p.y - radius); c.lineTo(p.x + radius, p.y); c.lineTo(p.x, p.y + radius); c.lineTo(p.x - radius, p.y); c.closePath(); c.stroke(); c.restore();
     }
     if (options.hover) {
-      const p = center(options.hover), blocked = WORLD.blocked.some(cell => cell.x === options.hover.x && cell.y === options.hover.y);
+      const p = center(options.hover), blocked = this.world.blocked.some(cell => cell.x === options.hover.x && cell.y === options.hover.y);
       const occupied = [...(state.party || []), ...(state.enemies || [])].some(unit => unit.alive && unit.x === options.hover.x && unit.y === options.hover.y);
       const tint = blocked && !occupied ? '#c2756430' : options.mode !== 'move' && occupied ? '#c48b7040' : '#c2d2a525';
       roundRect(c, p.x - 22, p.y - 22, 44, 44, 4, tint);
@@ -356,7 +360,7 @@ export class MapRenderer {
   }
 
   paintScroll(c, t) {
-    const p = center(WORLD.scroll), pulse = .65 + Math.sin(t * 2) * .2;
+    const p = center(this.world.scroll), pulse = .65 + Math.sin(t * 2) * .2;
     const glow = c.createRadialGradient(p.x, p.y, 2, p.x, p.y, 37);
     glow.addColorStop(0, `rgba(209,185,99,${pulse * .28})`); glow.addColorStop(1, '#ccb47300');
     c.fillStyle = glow; c.fillRect(p.x - 37, p.y - 37, 74, 74);
@@ -370,7 +374,7 @@ export class MapRenderer {
   }
 
   paintNpc(c, t) {
-    const p = center(WORLD.npc);
+    const p = center(this.world.npc);
     circle(c, p.x, p.y + 10, 14, '#102b2455');
     c.save(); c.translate(p.x, p.y);
     line(c, [[-6, 9], [-7, 15]], '#3b4537', 6); line(c, [[6, 9], [7, 15]], '#3b4537', 6);
@@ -407,6 +411,11 @@ export class MapRenderer {
       if (active) {
         c.fillStyle = '#f1d48d'; c.beginPath(); c.moveTo(p.x - 4, p.y - 33); c.lineTo(p.x + 4, p.y - 33); c.lineTo(p.x, p.y - 28); c.closePath(); c.fill();
       }
+    }
+    if (unit.barrierHealth > 0) {
+      c.strokeStyle='#8ddbe5aa'; c.fillStyle='#8ddbe512'; c.lineWidth=2; c.beginPath();
+      for(let i=0;i<6;i++){const a=i*Math.PI/3-Math.PI/2,x=p.x+26*Math.cos(a),y=p.y+28*Math.sin(a);if(i)c.lineTo(x,y);else c.moveTo(x,y);}
+      c.closePath();c.fill();c.stroke();
     }
     if (unit.defending) {
       c.strokeStyle = '#95cbd58c'; c.lineWidth = 1.7; c.beginPath(); c.arc(p.x, p.y + 1, 23, Math.PI * 1.05, TAU * .96); c.stroke();
@@ -458,8 +467,8 @@ export class MapRenderer {
     roundRect(c, 7, 4, 5, 7, 1, '#70624b');
     line(c, [[-10, -2], [-13, 6]], enemy ? '#b39779' : color, 5);
     line(c, [[10, -2], [13, 6]], enemy ? '#b39779' : color, 5);
-    circle(c, -13, 7, 2.6, '#d4b595'); circle(c, 13, 7, 2.6, '#d4b595');
-    circle(c, 0, -10, 8, '#ddc09c');
+    circle(c, -13, 7, 2.6, unit.appearance?.skin || '#d4b595'); circle(c, 13, 7, 2.6, unit.appearance?.skin || '#d4b595');
+    circle(c, 0, -10, 8, unit.appearance?.skin || '#ddc09c');
     if (enemy) {
       circle(c, 0, -13, 8.5, '#2c3631');
       roundRect(c, -7, -10, 14, 6, 1, '#d4c6a4');
@@ -467,8 +476,10 @@ export class MapRenderer {
       roundRect(c, -7, -3, 14, 3, 1, color);
       line(c, [[12, 8], [19, 2]], '#b4b9a5', 2); line(c, [[11, 9], [15, 12]], '#6d654b', 2);
     } else {
-      const hair = unit.id === 'ren' ? '#564331' : unit.id === 'sora' ? '#273d3a' : '#463647';
-      c.fillStyle = hair; c.beginPath(); c.moveTo(-8, -9); c.lineTo(-9, -17); c.lineTo(-5, -16); c.lineTo(-4, -22); c.lineTo(0, -18); c.lineTo(5, -22); c.lineTo(6, -17); c.lineTo(10, -17); c.lineTo(8, -9); c.lineTo(3, -14); c.lineTo(-1, -12); c.closePath(); c.fill();
+      const hair = unit.appearance?.hair || (unit.id === 'ren' ? '#564331' : unit.id === 'sora' ? '#273d3a' : '#463647');
+      if (unit.appearance?.hairStyle === 'long') roundRect(c,-11,-18,22,28,5,hair);
+      if(unit.appearance?.hairStyle === 'short') roundRect(c,-8,-19,16,9,4,hair);
+      else { c.fillStyle = hair; c.beginPath(); c.moveTo(-8, -9); c.lineTo(-9, -17); c.lineTo(-5, -16); c.lineTo(-4, -22); c.lineTo(0, -18); c.lineTo(5, -22); c.lineTo(6, -17); c.lineTo(10, -17); c.lineTo(8, -9); c.lineTo(3, -14); c.lineTo(-1, -12); c.closePath(); c.fill(); }
       roundRect(c, -8, -12, 16, 4, 1, '#263936'); roundRect(c, -5, -12, 10, 4, 1, '#adbbb0');
       c.strokeStyle = '#4d6760'; c.lineWidth = .8; c.beginPath(); c.arc(0, -10, 1.1, .5, 5.8); c.stroke();
       circle(c, -3, -6, .8, '#293832'); circle(c, 3, -6, .8, '#293832');
@@ -524,11 +535,11 @@ export class MapRenderer {
     const hover = this.options.hover;
     if (!hover) { this.canvas.style.cursor = 'default'; return; }
     const unit = units.find(item => item.x === hover.x && item.y === hover.y);
-    const npc = hover.x === WORLD.npc.x && hover.y === WORLD.npc.y;
-    const scroll = hover.x === WORLD.scroll.x && hover.y === WORLD.scroll.y;
-    const blocked = WORLD.blocked.some(cell => cell.x === hover.x && cell.y === hover.y);
+    const npc = hover.x === this.world.npc.x && hover.y === this.world.npc.y;
+    const scroll = hover.x === this.world.scroll.x && hover.y === this.world.scroll.y;
+    const blocked = this.world.blocked.some(cell => cell.x === hover.x && cell.y === hover.y);
     this.canvas.style.cursor = unit || npc || scroll ? 'pointer' : blocked ? 'not-allowed' : 'crosshair';
-    const label = unit?.name || (npc ? 'Старый проводник' : scroll ? 'Запечатанный свиток' : null);
+    const label = unit?.name || (npc ? this.world.npcName : scroll ? this.world.objectName : null);
     if (!label) return;
     const p = center(hover);
     c.save(); c.font = '11px sans-serif'; c.textAlign = 'center';

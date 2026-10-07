@@ -1,5 +1,6 @@
 import { createParty } from './characters.js';
-import { WORLD } from './world.js';
+import { WORLD, getWorld } from './world.js';
+import { createHero, resourcesFor } from './creator.js';
 
 // Naruto Diamond 0.6, pp. «Базовые понятия» / «Боевая сцена».
 // Grid movement, weapon ranges, stable initiative ties and cloth protection
@@ -65,12 +66,8 @@ export function computeDamage({ critical = 0, surface = 0, armor = 0, soak = 0, 
   };
 }
 
-export function deriveResources(attributes, skills) {
-  return {
-    hp: track(3 + attributes.stamina),
-    chakra: track(attributes.stamina + attributes.resolve + skills.chakraControl),
-    will: track(attributes.composure + attributes.resolve),
-  };
+export function deriveResources(attributes, skills, clan = 'clanless') {
+  return resourcesFor(attributes, skills, clan);
 }
 
 /** All counters mean damage/spending, not remaining points. */
@@ -97,7 +94,7 @@ export function rerollWithWill(roll, indices, rng = Math.random) {
   return { ...roll, dice, successes: dice.reduce((sum, die) => sum + successValue(die), 0), rerolled: chosen };
 }
 
-function makeBandits() {
+function makeBandits(worldId = 'forest') {
   return [
     { id: 'bandit-scout', name: 'Дозорный', role: 'Разбойник · метатель', x: 14, y: 6, weapon: 'shuriken', color: '#cb8158' },
     { id: 'bandit-blade', name: 'Старый клинок', role: 'Разбойник · ближний бой', x: 16, y: 8, weapon: 'melee', color: '#b06a61' },
@@ -105,20 +102,24 @@ function makeBandits() {
   ].map((preset) => {
     const attributes = { strength: 2, dexterity: 2, stamina: 1, charisma: 1, manipulation: 1, composure: 1, intelligence: 1, wits: 1, resolve: 1 };
     const skills = { athletics: 1, brawl: 1, melee: 1, shooting: 1, chakraControl: 0, awareness: 1 };
+    if (worldId === 'archive' && preset.id === 'bandit-leader') { attributes.stamina = 3; attributes.dexterity = 3; }
     return {
-      ...preset, team: 'enemy', attributes, skills, specializations: [], jutsu: {},
+      ...preset, ...(worldId === 'ruins' ? {name: { 'bandit-scout': 'Страж руин', 'bandit-blade': 'Наёмник', 'bandit-leader': 'Сэйдзи' }[preset.id]} : worldId === 'archive' ? {name: { 'bandit-scout': 'Хранитель', 'bandit-blade': 'Тень архива', 'bandit-leader': 'Куро' }[preset.id]} : {}), team: 'enemy', attributes, skills, specializations: [], jutsu: {},
       ...deriveResources(attributes, skills), armor: 0, alive: true,
-      actions: actions(), defending: false, clones: 0,
+      actions: actions(), defending: false, clones: 0, barrierHealth: 0,
       activation: { reaction: 0, strength: 0, endurance: 0 }, activationLevels: {},
     };
   });
 }
 
 export class CampaignGame {
-  constructor({ onChange = () => {}, onUpdate, rng = Math.random } = {}) {
+  constructor({ onChange = () => {}, onUpdate, rng = Math.random, hero = null, world = WORLD } = {}) {
     this.onChange = onUpdate || onChange;
     this.rng = rng;
-    this.blocked = new Set(WORLD.blocked.map(({ x, y }) => cellKey(x, y)));
+    this.world = getWorld(world.id);
+    this.heroSpec = hero ? copy(hero) : null;
+    if (this.heroSpec) createHero(this.heroSpec);
+    this.blocked = new Set(this.world.blocked.map(({ x, y }) => cellKey(x, y)));
     this._lastSkillRoll = null;
     this.restart();
   }
@@ -129,29 +130,41 @@ export class CampaignGame {
   getSnapshot() { return copy(this.state); }
   notify() { this.onChange(this.getSnapshot()); }
 
-  serialize() { return { version: 1, state: this.getSnapshot() }; }
+  serialize() { return { version: 1, worldId: this.world.id, hero: copy(this.heroSpec), state: this.getSnapshot() }; }
+
+  _partyPresets() {
+    const party = createParty();
+    if (this.heroSpec) party[0] = createHero(this.heroSpec);
+    return party;
+  }
 
   load(data) {
     // Rebuild immutable character/rule data from presets. A save may restore
     // progress, but cannot grant attributes, skills, equipment or extra units.
+    const previous = {world:this.world, hero:this.heroSpec, blocked:this.blocked};
     try {
       if (!data || data.version !== 1 || !data.state || typeof data.state !== 'object') throw new Error('Неизвестный формат сохранения.');
+      const nextWorld = getWorld(data.worldId || 'forest');
+      const nextHero = data.hero ? copy(data.hero) : null;
+      if (nextHero) createHero(nextHero);
+      this.world = nextWorld; this.heroSpec = nextHero;
+      this.blocked = new Set(nextWorld.blocked.map(({x,y}) => cellKey(x,y)));
       const saved = data.state;
       if (!['exploration', 'combat', 'won', 'lost'].includes(saved.phase) ||
           !['meet', 'crossing', 'resolved'].includes(saved.questStage)) throw new Error('Некорректный этап миссии.');
       if (!Array.isArray(saved.party) || !Array.isArray(saved.enemies) || saved.party.length !== 3 || saved.enemies.length !== 3) throw new Error('Некорректный состав отряда.');
-      const canonicalParty = createParty();
-      const canonicalEnemies = makeBandits();
+      const canonicalParty = this._partyPresets();
+      const canonicalEnemies = makeBandits(this.world.id);
       const positions = new Set();
       const restore = (units, presets, team) => presets.map((preset) => {
         const matches = units.filter((unit) => unit?.id === preset.id);
         if (matches.length !== 1) throw new Error('Неизвестные или повторяющиеся персонажи.');
         const savedUnit = matches[0];
-        const resources = deriveResources(preset.attributes, preset.skills);
+        const resources = deriveResources(preset.attributes, preset.skills, preset.clanId);
         if (typeof savedUnit.alive !== 'boolean' || !Number.isInteger(savedUnit.x) || !Number.isInteger(savedUnit.y) ||
-            savedUnit.x < 0 || savedUnit.y < 0 || savedUnit.x >= WORLD.width || savedUnit.y >= WORLD.height ||
+            savedUnit.x < 0 || savedUnit.y < 0 || savedUnit.x >= this.world.width || savedUnit.y >= this.world.height ||
             this.blocked.has(cellKey(savedUnit.x, savedUnit.y)) ||
-            (WORLD.npc.x === savedUnit.x && WORLD.npc.y === savedUnit.y)) throw new Error('Некорректная позиция персонажа.');
+            (this.world.npc.x === savedUnit.x && this.world.npc.y === savedUnit.y)) throw new Error('Некорректная позиция персонажа.');
         const key = cellKey(savedUnit.x, savedUnit.y);
         if (savedUnit.alive && positions.has(key)) throw new Error('Два персонажа занимают одну клетку.');
         if (savedUnit.alive) positions.add(key);
@@ -171,7 +184,7 @@ export class CampaignGame {
           activation[name] > Math.min(preset.activationLevels?.[name] || 0, preset.skills.chakraControl || 0))) throw new Error('Некорректная активация чакры.');
         if (!Number.isInteger(savedUnit.clones) || savedUnit.clones < 0 || savedUnit.clones > (preset.jutsu.clone || 0) ||
             typeof savedUnit.defending !== 'boolean') throw new Error('Некорректное защитное состояние.');
-        return { ...copy(preset), ...resources, team, x: savedUnit.x, y: savedUnit.y, alive: savedUnit.alive,
+        return { ...copy(preset), ...resources, team, barrierHealth: Number.isInteger(savedUnit.barrierHealth) && savedUnit.barrierHealth >= 0 && savedUnit.barrierHealth <= (preset.jutsu?.barrier || 0) ? savedUnit.barrierHealth : 0, x: savedUnit.x, y: savedUnit.y, alive: savedUnit.alive,
           ...(['knocked-out', 'chakra-exhausted', 'unconscious', 'fled'].includes(savedUnit.condition) ? { condition: savedUnit.condition } : {}),
           actions: { ...turnActions }, activation: { ...activation },
           activationLevels: { ...preset.activationLevels }, clones: savedUnit.clones, defending: savedUnit.defending };
@@ -201,27 +214,27 @@ export class CampaignGame {
           ...(Array.isArray(entry.dice) ? { dice: entry.dice.filter((die) => Number.isInteger(die) && die >= 1 && die <= 10).slice(0, 100) } : {}),
           ...(Number.isFinite(entry.successes) ? { successes: Math.max(0, Math.min(200, entry.successes)) } : {}) })) : [];
       this.state = {
-        phase: saved.phase, questStage: saved.questStage, party, enemies,
+        worldId: this.world.id, phase: saved.phase, questStage: saved.questStage, party, enemies,
         selectedId: saved.selectedId, activeId: saved.activeId, round: saved.round,
         order: [...saved.order], turnIndex: saved.turnIndex, advantage: saved.advantage,
         log: safeLog(saved.log, 100), history: safeLog(saved.history, 500),
         initiative: [], lastRoll: null, lastMove: null,
       };
       this._lastSkillRoll = null; this.notify(); return { ok: true };
-    } catch (error) { return this._fail(error.message || 'Сохранение повреждено.'); }
+    } catch (error) { this.world=previous.world;this.heroSpec=previous.hero;this.blocked=previous.blocked;return this._fail(error.message || 'Сохранение повреждено.'); }
   }
 
   restart() {
     const starts = [{ x: 3, y: 7 }, { x: 2, y: 8 }, { x: 3, y: 9 }];
-    const party = createParty().map((preset, index) => ({
+    const party = this._partyPresets().map((preset, index) => ({
       ...preset, ...starts[index], team: 'ally', alive: true, armor: preset.armor ?? 2,
-      ...deriveResources(preset.attributes, preset.skills),
-      actions: actions(), defending: false, clones: 0,
+      ...deriveResources(preset.attributes, preset.skills, preset.clanId),
+      actions: actions(), defending: false, clones: 0, barrierHealth: 0,
       activation: { reaction: 0, strength: 0, endurance: 0 },
       activationLevels: { ...preset.activationLevels },
     }));
     this.state = {
-      phase: 'exploration', party, enemies: makeBandits(), selectedId: party[0].id,
+      worldId: this.world.id, phase: 'exploration', party, enemies: makeBandits(this.world.id), selectedId: party[0].id,
       round: 0, order: [], initiative: [], turnIndex: 0, activeId: null,
       log: [], questStage: 'meet', history: [], lastRoll: null, lastMove: null,
       advantage: false,
@@ -252,12 +265,12 @@ export class CampaignGame {
 
   _occupied(x, y, exceptId) {
     return this.allUnits.some((unit) => unit.alive && unit.id !== exceptId && unit.x === x && unit.y === y) ||
-      (WORLD.npc.x === x && WORLD.npc.y === y);
+      (this.world.npc.x === x && this.world.npc.y === y);
   }
 
   _walkable(x, y, exceptId) {
     return Number.isInteger(x) && Number.isInteger(y) && x >= 0 && y >= 0 &&
-      x < WORLD.width && y < WORLD.height && !this.blocked.has(cellKey(x, y)) && !this._occupied(x, y, exceptId);
+      x < this.world.width && y < this.world.height && !this.blocked.has(cellKey(x, y)) && !this._occupied(x, y, exceptId);
   }
 
   findPath(unit, x, y) {
@@ -292,7 +305,7 @@ export class CampaignGame {
   // Public preview has no side effects, allowing the map to show legal steps.
   reachableCells(unit = this.selected) {
     if (!unit?.alive || ['won', 'lost'].includes(this.state.phase)) return [];
-    const budget = this.state.phase === 'combat' ? unit.actions.movement : WORLD.width * WORLD.height;
+    const budget = this.state.phase === 'combat' ? unit.actions.movement : this.world.width * this.world.height;
     const queue = [{ x: unit.x, y: unit.y, cost: 0 }];
     const seen = new Set([cellKey(unit.x, unit.y)]);
     for (let index = 0; index < queue.length; index++) {
@@ -310,6 +323,7 @@ export class CampaignGame {
   moveTo(x, y) {
     const unit = this.selected;
     if (!unit?.alive || !['exploration', 'combat'].includes(this.state.phase)) return this._fail('Сейчас нельзя перемещаться.');
+    if (unit.barrierHealth) return this._fail('Во время поддержания барьера нельзя двигаться.');
     if (this.state.phase === 'combat' && unit.id !== this.state.activeId) return this._fail('Сейчас ход противника.');
     const path = this.findPath(unit, x, y);
     if (!path) return this._fail('Путь перекрыт или клетка занята.');
@@ -365,7 +379,7 @@ export class CampaignGame {
     const unit = this.allUnits.find((candidate) => candidate.id === id);
     this.state.activeId = id;
     unit.actions = { ...actions(), reaction: unit.actions.reaction };
-    unit.defending = false;
+    unit.defending = false; unit.barrierHealth = 0;
     if (unit.team === 'ally') this.state.selectedId = id;
     this._log(`Ход: ${unit.name}.`, unit.team === 'ally' ? 'turn' : 'enemy');
   }
@@ -401,7 +415,7 @@ export class CampaignGame {
       const twice = error * 2;
       if (twice > -dy) { error -= dy; x += sx; }
       if (twice < dx) { error += dx; y += sy; }
-      const terrain = WORLD.tiles?.[y]?.[x];
+      const terrain = this.world.tiles?.[y]?.[x];
       if (this.blocked.has(cellKey(x, y)) && terrain !== 'water' && terrain !== 'river') return false;
     }
     return true;
@@ -465,6 +479,11 @@ export class CampaignGame {
   }
 
   _damage(unit, damage) {
+    if (unit.barrierHealth) {
+      const force = damage.critical + Math.ceil(damage.surface / 2);
+      if (force <= unit.barrierHealth) { this._log(`${unit.name}: барьер поглощает атаку.`, 'defend'); return; }
+      unit.barrierHealth = 0; this._log(`${unit.name}: барьер разрушен.`, 'damage');
+    }
     unit.hp = applyTrackDamage(unit.hp, damage);
     if (unit.hp.critical >= unit.hp.max) {
       unit.alive = false; unit.condition = 'knocked-out';
@@ -510,6 +529,15 @@ export class CampaignGame {
     this._spendChakra(unit, 1); unit.activation[kind] = level; unit.actions.quick = false;
     this._log(`${unit.name}: активация ${kind === 'reaction' ? 'реакции' : kind === 'strength' ? 'силы' : 'выносливости'} ${level}, −1 чакра.`, 'jutsu');
     this._settleAction(); this.notify(); return { ok: true };
+  }
+
+  barrier() {
+    const actor=this._actor();if(actor.error)return this._fail(actor.error);
+    const unit=actor.unit;if(!unit.jutsu.barrier)return this._fail('Барьер не изучен.');
+    if(!this._canSpendChakra(unit,1))return this._fail('Недостаточно чакры или воли.');
+    this._spendChakra(unit,1);unit.actions.main=false;unit.barrierHealth=unit.jutsu.barrier;unit.actions.movement=0;
+    this._log(`${unit.name}: барьер ${unit.barrierHealth} до следующего хода, −1 чакра.`, 'jutsu');
+    this._settleAction();this.notify();return {ok:true};
   }
 
   defend() {
@@ -587,8 +615,8 @@ export class CampaignGame {
     if (this._attackAllowed(unit, target, kind)) {
       let best = null;
       for (const enemy of targets) {
-        for (let y = Math.max(0, enemy.y - range); y <= Math.min(WORLD.height - 1, enemy.y + range); y++) {
-          for (let x = Math.max(0, enemy.x - range); x <= Math.min(WORLD.width - 1, enemy.x + range); x++) {
+        for (let y = Math.max(0, enemy.y - range); y <= Math.min(this.world.height - 1, enemy.y + range); y++) {
+          for (let x = Math.max(0, enemy.x - range); x <= Math.min(this.world.width - 1, enemy.x + range); x++) {
             const position = { x, y };
             if (distance(position, enemy) > range || !this._lineOfSight(position, enemy)) continue;
             const path = this.findPath(unit, x, y);
@@ -618,7 +646,7 @@ export class CampaignGame {
     } else if (!this.state.enemies.some((unit) => unit.alive)) {
       this.state.phase = 'exploration'; this.state.questStage = 'resolved'; this.state.activeId = null;
       this.state.selectedId = this.state.party.find((unit) => unit.alive).id;
-      this.state.party.forEach((unit) => { unit.activation = { reaction: 0, strength: 0, endurance: 0 }; unit.clones = 0; unit.defending = false; });
+      this.state.party.forEach((unit) => { unit.activation = { reaction: 0, strength: 0, endurance: 0 }; unit.clones = 0; unit.defending = false; unit.barrierHealth = 0; });
       this._log('Разбойники обезврежены. Заберите свиток у лагеря на восточном берегу.', 'victory');
     }
   }
@@ -638,7 +666,7 @@ export class CampaignGame {
 
   collectScroll() {
     if (this.state.phase !== 'exploration' || this.state.questStage !== 'resolved') return this._fail('Сначала решите столкновение с разбойниками.');
-    if (!this.selected?.alive || distance(this.selected, WORLD.scroll) > 1) return this._fail('Подойдите к свитку на восточном берегу.');
+    if (!this.selected?.alive || distance(this.selected, this.world.scroll) > 1) return this._fail('Подойдите к свитку на восточном берегу.');
     this.state.phase = 'won'; this._log('Свиток возвращён. Миссия завершена — отряд возвращается в Коноху.', 'victory');
     this.notify(); return { ok: true };
   }
